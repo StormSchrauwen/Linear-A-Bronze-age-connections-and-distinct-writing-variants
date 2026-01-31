@@ -1,0 +1,142 @@
+# =====================================================
+# LinearA.xyz → Schrijfvariant-analyse + tokenanalyse
+# =====================================================
+
+import os
+import json
+import pandas as pd
+import re
+from collections import Counter
+
+# --- 1️⃣ Clone de lineara.xyz repo ---
+if os.path.exists("lineara.xyz"):
+    os.system("rm -rf lineara.xyz")
+os.system("git clone https://github.com/mwenge/lineara.xyz.git")
+
+# --- 2️⃣ Vind JSON-bestanden ---
+json_files = []
+for root, dirs, files in os.walk("lineara.xyz/items_analysis"):
+    for file in files:
+        if file.endswith(".json"):
+            json_files.append(os.path.join(root, file))
+
+# --- 3️⃣ Laad JSON en flatten ---
+all_entries = []
+for jf in json_files:
+    with open(jf, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    all_entries.append(item)
+                elif isinstance(item, list):
+                    for sub in item:
+                        if isinstance(sub, dict):
+                            all_entries.append(sub)
+        elif isinstance(data, dict):
+            all_entries.append(data)
+
+# --- 4️⃣ DataFrame maken ---
+rows = []
+for entry in all_entries:
+    text = entry.get("transcription", entry.get("parsedInscription", ""))
+    rows.append({
+        "id": entry.get("name", entry.get("id")),
+        "text": text,
+        "site": entry.get("site"),
+        "object_type": entry.get("support", entry.get("object_type"))
+    })
+
+df = pd.DataFrame(rows)
+
+# --- 5️⃣ Normalisatie & tokenisatie ---
+def normalize(text):
+    if not text:
+        return ""
+    text = re.sub(r"\s+", "", text)
+    return text
+
+df["norm_text"] = df["text"].apply(normalize)
+df["tokens"] = df["norm_text"].apply(lambda x: list(x))
+
+# --- 6️⃣ Filter: alleen inscripties met site ---
+readable = df[df["site"].notna()].copy()
+
+# =====================================================
+# 🔍 Tokenanalyse + afwijkingsscore + kenmerkende tokens
+# =====================================================
+
+# --- a) Alle tokens tellen voor rare tokens ---
+all_tokens = Counter()
+for toks in readable["tokens"]:
+    all_tokens.update(toks)
+
+# Rare tokens (<3 keer)
+rare_tokens_set = {tok for tok, cnt in all_tokens.items() if cnt < 3}
+
+# --- b) Afwijking per token t.o.v. gemiddelde (oude methode) ---
+site_token_freq = (
+    readable
+    .explode("tokens")
+    .groupby(["site","tokens"])
+    .size()
+    .unstack(fill_value=0)
+)
+
+site_token_freq_norm = site_token_freq.div(site_token_freq.sum(axis=1), axis=0)
+mean_profile = site_token_freq_norm.mean(axis=0)
+
+site_deviation = site_token_freq_norm.sub(mean_profile).abs().sum(axis=1)
+site_deviation_df = site_deviation.reset_index()
+site_deviation_df.columns = ["site", "deviation_score"]
+
+# Kenmerkende tokens per site (>2% afwijking)
+distinctive_tokens = {}
+for site in site_token_freq_norm.index:
+    diffs = site_token_freq_norm.loc[site] - mean_profile
+    distinctive = diffs[diffs > 0.02]
+    distinctive_tokens[site] = list(distinctive.index)
+
+# --- c) Classificatie sites + rare tokens info ---
+results = []
+mean_dev = site_deviation_df["deviation_score"].mean()
+for site in site_token_freq_norm.index:
+    score = site_deviation_df.loc[site_deviation_df["site"]==site,"deviation_score"].values[0]
+    num_tokens = len(distinctive_tokens[site])
+    is_variant = score > mean_dev and num_tokens >= 3
+
+    # rare tokens op site
+    tokens_on_site = [t for sublist in readable[readable["site"]==site]["tokens"] for t in sublist]
+    site_rare_tokens = [t for t in tokens_on_site if t in rare_tokens_set]
+
+    results.append({
+        "site": site,
+        "deviation_score": round(score,3),
+        "num_distinctive_tokens": num_tokens,
+        "distinctive_tokens": ", ".join(distinctive_tokens[site]),
+        "num_rare_tokens": len(site_rare_tokens),
+        "rare_tokens": ", ".join(sorted(set(site_rare_tokens))),
+        "classification": "aparte schrijfvariant" if is_variant else "geen duidelijke schrijfvariant"
+    })
+
+variant_df = pd.DataFrame(results)
+
+# --- d) Automatische conclusie ---
+def conclusion(row):
+    if row["classification"] == "aparte schrijfvariant":
+        return (
+            f"De inscripties van {row['site']} vertonen een afwijkend tekengebruik "
+            f"met meerdere kenmerkende tekens. Mogelijk lokale schrijfvariant."
+        )
+    else:
+        return (
+            f"De inscripties van {row['site']} passen binnen de algemene "
+            f"schrijftraditie van Linear A."
+        )
+
+variant_df["conclusion"] = variant_df.apply(conclusion, axis=1)
+
+# --- 7️⃣ Opslaan CSV ---
+variant_df.to_csv("linearA_tokenanalyse_allsites.csv", index=False)
+print("CSV opgeslagen als linearA_tokenanalyse_allsites.csv")
+print(variant_df[["site","classification","num_rare_tokens","deviation_score"]])
