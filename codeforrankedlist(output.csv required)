@@ -1,0 +1,21 @@
+import pandas as pd
+
+# 1️⃣ Laad je output (bijvoorbeeld een CSV met kolommen: site1, site2, shared_chars, freq_overlap, lcs_length)
+df = pd.read_csv("output.csv")
+
+# 2️⃣ Bereken een gecombineerde score
+# Hier geven we LCS de meeste gewicht, gedeelde tekens en frequentie iets minder
+df['score'] = df['lcs_length']*0.5 + df['shared_chars']*0.3 + df['freq_overlap']*0.2
+
+# 3️⃣ Sorteer de paren op score, van hoog naar laag
+df_sorted = df.sort_values(by='score', ascending=False)
+
+# 4️⃣ Pak de top 50 meest waarschijnlijke routes
+top_routes = df_sorted.head(50)
+
+# 5️⃣ Toon de resultaten netjes
+print("Top 50 meest waarschijnlijke handels/kennisroutes:\n")
+print(top_routes[['site1', 'site2', 'shared_chars', 'freq_overlap', 'lcs_length', 'score']].to_string(index=False))
+
+# 6️⃣ Optioneel: sla de top 50 op in een CSV
+top_routes.to_csv("top_50_routes.csv", index=False)
