@@ -1,0 +1,147 @@
+from collections import Counter
+from itertools import combinations
+import pandas as pd
+import os
+import json
+import re
+
+# --- 1️⃣ Clone de lineara.xyz repo ---
+if os.path.exists("lineara.xyz"):
+    os.system("rm -rf lineara.xyz")
+os.system("git clone https://github.com/mwenge/lineara.xyz.git")
+
+# --- 2️⃣ Vind JSON-bestanden ---
+json_files = []
+for root, dirs, files in os.walk("lineara.xyz/items_analysis"):
+    for file in files:
+        if file.endswith(".json"):
+            json_files.append(os.path.join(root, file))
+
+# --- 3️⃣ Laad JSON en flatten ---
+all_entries = []
+for jf in json_files:
+    with open(jf, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    all_entries.append(item)
+                elif isinstance(item, list):
+                    for sub in item:
+                        if isinstance(sub, dict):
+                            all_entries.append(sub)
+        elif isinstance(data, dict):
+            all_entries.append(data)
+
+# --- 4️⃣ DataFrame maken ---
+rows = []
+for entry in all_entries:
+    text = entry.get("transcription", entry.get("parsedInscription", ""))
+    rows.append({
+        "id": entry.get("name", entry.get("id")),
+        "text": text,
+        "site": entry.get("site"),
+        "object_type": entry.get("support", entry.get("object_type")),
+        "date": entry.get("date")  # Dateringen meenemen
+    })
+
+df = pd.DataFrame(rows)
+
+# --- 5️⃣ Normalisatie & tokenisatie ---
+def normalize(text):
+    if not text:
+        return ""
+    text = re.sub(r"\s+", "", text)
+    return text
+
+df["norm_text"] = df["text"].apply(normalize)
+df["tokens"] = df["norm_text"].apply(lambda x: list(x))
+
+# --- 6️⃣ Filter: alleen inscripties met site ---
+readable = df[df["site"].notna()].copy()
+
+# ===========================================
+# 1) Bereid per site een “tekst” voor
+# ===========================================
+
+# Groepeer tokens per site en maak er één lange string van
+site_sequences = {}
+for site, group in readable.groupby("site")["tokens"]:
+    # Flatten de tokens in één string
+    all_tokens = [t for sublist in group for t in sublist]
+    site_sequences[site] = "".join(all_tokens)
+
+# ===========================================
+# 2) Functies voor analyses
+# ===========================================
+
+def shared_chars_set(seq1, seq2):
+    """Gedeelde tekens tussen twee sites (set overlap)."""
+    return set(seq1) & set(seq2)
+
+def shared_chars_freq(seq1, seq2):
+    """Frequenties van gedeelde tekens tussen twee sites."""
+    c1 = Counter(seq1)
+    c2 = Counter(seq2)
+    return {char: min(c1[char], c2[char]) for char in c1 if char in c2}
+
+def lcs_length(seq1, seq2):
+    """Compute Longest Common Subsequence length."""
+    a, b = seq1, seq2
+    dp = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(len(a)):
+        for j in range(len(b)):
+            if a[i] == b[j]:
+                dp[i+1][j+1] = dp[i][j] + 1
+            else:
+                dp[i+1][j+1] = max(dp[i][j+1], dp[i+1][j])
+    return dp[-1][-1]
+
+# ===========================================
+# 3) Collecteer en sla op naar CSV
+# ===========================================
+
+print("\n=== Overzicht van schrijfverbanden tussen alle sites ===\n")
+
+network_analysis_results = []
+
+for s1, s2 in combinations(site_sequences.keys(), 2):
+    seq1 = site_sequences[s1]
+    seq2 = site_sequences[s2]
+
+    shared_tokens = shared_chars_set(seq1, seq2)
+    freq_dict = shared_chars_freq(seq1, seq2)
+    lcs_len = lcs_length(seq1, seq2)
+
+    # Calculate freq_overlap as sum of counts in freq_dict
+    freq_overlap_val = sum(freq_dict.values())
+
+    network_analysis_results.append({
+        "site1": s1,
+        "site2": s2,
+        "shared_chars": len(shared_tokens), # Number of unique shared characters
+        "freq_overlap": freq_overlap_val,    # Sum of frequencies of shared characters
+        "lcs_length": lcs_len
+    })
+
+# Create DataFrame and save to CSV
+output_df = pd.DataFrame(network_analysis_results)
+output_df.to_csv("output.csv", index=False)
+
+print("Netwerkanalyse opgeslagen in output.csv")
+
+# Keep the print comparison function if needed for console output
+def print_comparison(site1, site2, shared, freq, lcs_len):
+    print(f"{site1} ↔ {site2}")
+    print("-"*60)
+    print(f"Gedeelde tekens ({len(shared)}): {', '.join(sorted(shared))}")
+    print(f"Frequenties van gedeelde tekens: {freq}")
+    print(f"LCS lengte: {lcs_len}")
+    print("="*60 + "\n")
+
+# Optionally, you can still print the comparison to console for a few examples
+# if you want, but the main goal is to save to CSV.
+# For example, to print the first 5 comparisons:
+# for i in range(min(5, len(network_analysis_results))):
+#     res = network_analysis_results[i]
+#     print_comparison(res['site1'], res['site2'], shared_chars_set(site_sequences[res['site1']], site_sequences[res['site2']]), shared_chars_freq(site_sequences[res['site1']], site_sequences[res['site2']]), res['lcs_length'])
